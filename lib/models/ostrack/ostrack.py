@@ -109,6 +109,8 @@ def build_ostrack(cfg, training=True):
         backbone = vit_base_patch16_224_ce(pretrained, drop_path_rate=cfg.TRAIN.DROP_PATH_RATE,
                                            ce_loc=cfg.MODEL.BACKBONE.CE_LOC,
                                            ce_keep_ratio=cfg.MODEL.BACKBONE.CE_KEEP_RATIO,
+                                           gnn_layers_per_stage=cfg.MODEL.BACKBONE.GNN_LAYERS_PER_STAGE,
+                                           gnn_type=cfg.MODEL.BACKBONE.GNN_TYPE
                                            )
         hidden_dim = backbone.embed_dim
         patch_start_index = 1
@@ -117,6 +119,8 @@ def build_ostrack(cfg, training=True):
         backbone = vit_large_patch16_224_ce(pretrained, drop_path_rate=cfg.TRAIN.DROP_PATH_RATE,
                                             ce_loc=cfg.MODEL.BACKBONE.CE_LOC,
                                             ce_keep_ratio=cfg.MODEL.BACKBONE.CE_KEEP_RATIO,
+                                            gnn_layers_per_stage=cfg.MODEL.BACKBONE.GNN_LAYERS_PER_STAGE,
+                                            gnn_type=cfg.MODEL.BACKBONE.GNN_TYPE
                                             )
 
         hidden_dim = backbone.embed_dim

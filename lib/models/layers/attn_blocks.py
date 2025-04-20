@@ -45,8 +45,9 @@ class GCNLayer(nn.Module):
     """
     Simple GCN layer, similar to https://arxiv.org/abs/1609.02907
     """
-    def __init__(self, in_features, out_features):
+    def __init__(self, in_features, out_features, pooling_method = "avg"):
         super(GCNLayer, self).__init__()
+        self.pooling_method = pooling_method
         self.linear = nn.Linear(in_features, out_features)
 
     def forward(self, x, adj_matrix):
@@ -55,19 +56,41 @@ class GCNLayer(nn.Module):
         :param adj_matrix: Adjacency matrix (B, N, N)  (technically, attention weights between T and S)
         :return: Output node features. Shape: (B, N, D_out)
         """
-        # Support is the result of multiplying features by weights
-        support = self.linear(x) # (B,N,D)
-        # Output is the result of multiplying adjacency matrix by the support
-        output = torch.bmm(adj_matrix, support) # (B, N, N) * (B, N, D) --> (B, N, D)
 
-        return output
+        support = self.linear(x) # (B,N,D_out)
+
+        if adj_matrix.dim() == 4 and self.pooling_method == "concat":
+            B, H, N, _ = adj_matrix.shape       # (B,H,N,N)
+
+            # Expand support to dimensions: (B, H, N, D_out)
+            support = support.unsqueeze(1).expand(-1, H, -1, -1)        # unsqueeze changes it to (B,1,N,D_out), then repeats all values H times across that dimension
+            # Result tensor to hold the outputs per head
+            outputs = []
+            # Regular batch‑matrix multiply per head
+            for h in range(H):
+                # Get adj and support for head h
+                adj_h = adj_matrix[:, h, :, :]          # (B, N, N)
+                support_h = support[:, h, :, :]         # (B, N, D_out)
+                out_h = torch.bmm(adj_h, support_h)     # (B, N, D_out), as below
+                outputs.append(out_h)
+
+            out = torch.cat(outputs, dim=-1)            # Concatenate output from heads in last dimension (D_out)
+            return out                                  # (B, N, H*D_out)
+        elif adj_matrix.dim() == 3 and self.pooling_method == "avg":
+            # Original single‑head case - output is the result of batch-multiplying adjacency matrix by the support
+            out = torch.bmm(adj_matrix, support)
+            return out                                  # (B, N, D_out)
+        else:   
+            # copied for now, maybe we can add other pooling techniques
+            out = torch.bmm(adj_matrix, support)
+            return out                                  # (B, N, D_out)
 
 
 class CEBlock(nn.Module):
 
     def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=False, drop=0., attn_drop=0.,
                  drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm,
-                 keep_ratio_search=1.0, gnn_layers_per_stage = 1, gnn_type="GCN"): # ADDED keep_ratio_search, gnn_layers
+                 keep_ratio_search=1.0, gnn_layers_per_stage = 1, gnn_type="GCN", pooling_method="avg"): # ADDED keep_ratio_search, gnn_layers
         super().__init__()
         self.norm1 = norm_layer(dim)
         self.attn = Attention(dim, num_heads=num_heads, qkv_bias=qkv_bias, attn_drop=attn_drop, proj_drop=drop)
@@ -79,13 +102,15 @@ class CEBlock(nn.Module):
 
         self.keep_ratio_search = keep_ratio_search
         self.gnn_type = gnn_type
+        self.pooling_method = pooling_method
 
         # Dynamically create gnn_layers based on gnn_layers_per_stage.  Handles 0 layers gracefully.
         self.gnn_layers = nn.ModuleList()
         for _ in range(gnn_layers_per_stage):
             if self.gnn_type == 'GCN':
-                self.gnn_layers.append(GCNLayer(dim, dim))  # Input and output dim are the same
+                self.gnn_layers.append(GCNLayer(dim, dim, pooling_method=self.pooling_method))  # Input and output dim are the same
             elif self.gnn_type == 'GAT':
+                # Each head produces dim/num_heads features, the torch geometric implementation concats them automatically
                 head_dim = dim // num_heads
                 self.gnn_layers.append(
                     DenseGATConv(
@@ -94,7 +119,7 @@ class CEBlock(nn.Module):
                         heads=num_heads,
                         concat=True,
                         # dropout=attn_drop,
-                        residual=True
+                        residual=True       # to add a learnable skip connection, allowing it to learn the identity if needed
                     )
                 )
             else:
@@ -112,25 +137,40 @@ class CEBlock(nn.Module):
         lens_t = global_index_template.shape[1]
         lens_s = global_index_search.shape[1]
 
+        H = self.attn.num_heads
+
         #  GNN Processing
         if len(self.gnn_layers) > 0:
-
-            # Extract attention weights (Wzx) and normalize
             w_ts = attn[:, :, :lens_t, lens_t:]  # (B, H, T, S)
-            w_ts = w_ts.sum(dim=1) / self.attn.num_heads # Average over heads. (B, T, S)
-            w_ts = F.softmax(w_ts, dim=2)
+            if self.pooling_method == "avg":
+                # Extract attention weights and normalize
+                w_ts = w_ts.sum(dim=1) / H                                      # Average over heads. (B, N_t, N_s)
+                w_ts = F.softmax(w_ts, dim=2)
 
-            zeros_tt = torch.zeros(B, lens_t, lens_t, device=x.device)
-            zeros_ss = torch.zeros(B, lens_s, lens_s, device=x.device)
-            w_st = w_ts.transpose(1, 2)  # (B, N_s, N_t)
+                zeros_tt = torch.zeros(B, lens_t, lens_t, device=x.device)
+                zeros_ss = torch.zeros(B, lens_s, lens_s, device=x.device)
+                w_st = w_ts.transpose(1, 2)                                     # (B, N_s, N_t)
 
-            top = torch.cat([zeros_tt, w_ts], dim=2)  # (B, N_t, N_t + N_s)
-            bottom = torch.cat([w_st, zeros_ss], dim=2)  # (B, N_s, N_t + N_s)
-            adj = torch.cat([top, bottom], dim=1)  # (B, N_t + N_s, N_t + N_s)
+                top = torch.cat([zeros_tt, w_ts], dim=2)                        # (B, N_t, N_t + N_s)
+                bottom = torch.cat([w_st, zeros_ss], dim=2)                     # (B, N_s, N_t + N_s)
+                adj = torch.cat([top, bottom], dim=1)                           # (B, N_t + N_s, N_t + N_s)
+
+            elif self.pooling_method == "concat":
+                
+                w_ts = F.softmax(w_ts, dim=-1)
+                zeros_tt = torch.zeros(B, H, lens_t, lens_t, device=x.device)
+                zeros_ss = torch.zeros(B, H, lens_s, lens_s, device=x.device)
+                w_st = w_ts.transpose(-2, -1)                                   # (B, H, N_s, N_t)
+
+                top    = torch.cat([zeros_tt, w_ts], dim=-1)                    # (B, H, N_t, N_s)
+                bottom = torch.cat([w_st, zeros_ss], dim=-1)                    # (B, H, N_s, N_t+N_s)
+                adj    = torch.cat([top, bottom], dim=-2)                       # (B, H, N_t + N_s, N_t + N_s)
 
             # GNN Layers
+            # If pooling method == avg:     expects input (B, N, D) and adj (B, N_t + N_s, N_t + N_s) i.e. (B,N,N)     - outputs: (B, N, D)
+            # If pooling method == concat:  expects input (B, N, D) and adj (B, H, N_t + N_s, N_t + N_s) i.e (B,H,N,N) - outputs: (B, N, H*D)
             for gnn_layer in self.gnn_layers:
-                 x = gnn_layer(x, adj) # Expects input (B, N, D) and adj (B,S,T)
+                x = gnn_layer(x, adj)  
 
             # x = torch.cat([x_t, x_s], dim=1)
             x = x + self.drop_path(self.norm3(x)) #Add new normalized residual connection

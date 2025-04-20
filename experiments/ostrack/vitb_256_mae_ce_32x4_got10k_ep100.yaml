@@ -50,7 +50,7 @@ TRAIN:
   CE_START_EPOCH: 20  # candidate elimination start epoch
   CE_WARM_EPOCH: 50  # candidate elimination warm up epoch
   BATCH_SIZE: 32
-  EPOCH: 100
+  EPOCH: 2
   GIOU_WEIGHT: 2.0
   L1_WEIGHT: 5.0
   GRAD_CLIP_NORM: 0.1
@@ -66,7 +66,7 @@ TRAIN:
   WEIGHT_DECAY: 0.0001
   AMP: False
 TEST:
-  EPOCH: 100
+  EPOCH: 2
   SEARCH_FACTOR: 4.0
   SEARCH_SIZE: 256
   TEMPLATE_FACTOR: 2.0

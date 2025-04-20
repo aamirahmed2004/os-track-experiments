@@ -19,16 +19,16 @@ class Attention(nn.Module):
         self.proj = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
 
-        self.rpe =rpe
-        if self.rpe:
-            relative_position_index = \
-                generate_2d_concatenated_self_attention_relative_positional_encoding_index([z_size, z_size],
-                                                                                           [x_size, x_size])
-            self.register_buffer("relative_position_index", relative_position_index)
-            # define a parameter table of relative position bias
-            self.relative_position_bias_table = nn.Parameter(torch.empty((num_heads,
-                                                                          relative_position_index.max() + 1)))
-            trunc_normal_(self.relative_position_bias_table, std=0.02)
+        # self.rpe =rpe
+        # if self.rpe:
+        #     relative_position_index = \
+        #         generate_2d_concatenated_self_attention_relative_positional_encoding_index([z_size, z_size],
+        #                                                                                    [x_size, x_size])
+        #     self.register_buffer("relative_position_index", relative_position_index)
+        #     # define a parameter table of relative position bias
+        #     self.relative_position_bias_table = nn.Parameter(torch.empty((num_heads,
+        #                                                                   relative_position_index.max() + 1)))
+        #     trunc_normal_(self.relative_position_bias_table, std=0.02)
 
     def forward(self, x, mask=None, return_attention=False):
         # x: B, N, C
@@ -39,12 +39,12 @@ class Attention(nn.Module):
 
         attn = (q @ k.transpose(-2, -1)) * self.scale
 
-        if self.rpe:
-            relative_position_bias = self.relative_position_bias_table[:, self.relative_position_index].unsqueeze(0)
-            attn += relative_position_bias
+        # if self.rpe:
+        #     relative_position_bias = self.relative_position_bias_table[:, self.relative_position_index].unsqueeze(0)
+        #     attn += relative_position_bias
 
-        if mask is not None:
-            attn = attn.masked_fill(mask.unsqueeze(1).unsqueeze(2), float('-inf'),)
+        # if mask is not None:
+        #     attn = attn.masked_fill(mask.unsqueeze(1).unsqueeze(2), float('-inf'),)
 
         attn = attn.softmax(dim=-1)
         attn = self.attn_drop(attn)

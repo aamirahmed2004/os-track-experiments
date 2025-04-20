@@ -3,6 +3,7 @@ import logging
 from functools import partial
 from collections import OrderedDict
 from copy import deepcopy
+from torch_geometric.nn.dense import DenseGATConv
 
 import torch
 import torch.nn as nn
@@ -85,29 +86,31 @@ class CEBlock(nn.Module):
             if self.gnn_type == 'GCN':
                 self.gnn_layers.append(GCNLayer(dim, dim))  # Input and output dim are the same
             elif self.gnn_type == 'GAT':
-                # Placeholder for GAT layer.  Needs proper GATLayer implementation.
-                # Assumes single-head for simplicity;  adjust num_heads as needed.
-                raise NotImplementedError("GAT not yet implemented.")
+                head_dim = dim // num_heads
+                self.gnn_layers.append(
+                    DenseGATConv(
+                        in_channels=dim,
+                        out_channels=head_dim,
+                        heads=num_heads,
+                        concat=True,
+                        # dropout=attn_drop,
+                        residual=True
+                    )
+                )
             else:
                 raise ValueError(f"Unknown GNN type: {gnn_type}")
 
         self.norm3 = norm_layer(dim) # Added normalization after the GCN
 
 
-    def forward(self, x, global_index_t, global_index_s, mask_x=None, ce_template_mask=None,
-                ce_keep_rate=None,):
-
+    def forward(self, x, global_index_template, global_index_search, mask=None, ce_template_mask=None, ce_keep_rate=None):
         B, N, C = x.shape
-        x_attn, attn = self.attn(self.norm1(x), True)
+        x_attn, attn = self.attn(self.norm1(x), return_attention=True)
         x = x + self.drop_path(x_attn)
-        x_res = x
-        x = self.norm2(x)
-        x = self.mlp(x)
+        x = x + self.drop_path(self.mlp(self.norm2(x)))
 
-        x = x_res + self.drop_path(x)
-
-        lens_t = global_index_t.shape[1]
-        lens_s = global_index_s.shape[1]
+        lens_t = global_index_template.shape[1]
+        lens_s = global_index_search.shape[1]
 
         #  GNN Processing
         if len(self.gnn_layers) > 0:
@@ -132,7 +135,7 @@ class CEBlock(nn.Module):
             # x = torch.cat([x_t, x_s], dim=1)
             x = x + self.drop_path(self.norm3(x)) #Add new normalized residual connection
 
-        removed_index_s = None
+        removed_index_search = None
         if self.keep_ratio_search < 1:
             score_s = torch.mean(attn[:, :, :lens_t, lens_t:], dim=[1, 2])
             score_s = score_s.reshape(B, -1)
@@ -143,16 +146,16 @@ class CEBlock(nn.Module):
                 keep_ratio_search = self.keep_ratio_search
 
             keep_indices = torch.argsort(score_s, dim=1, descending=True)[:, :int(keep_ratio_search * score_s.shape[1])]
-            removed_index_s = torch.argsort(score_s, dim=1, descending=True)[:, int(keep_ratio_search * score_s.shape[1]):]
+            removed_index_search = torch.argsort(score_s, dim=1, descending=True)[:, int(keep_ratio_search * score_s.shape[1]):]
             # update global_index_s
             global_index_s = torch.gather(global_index_s, index=keep_indices, dim=1)
 
             # mask out tokens
             s_indices_keep = keep_indices + lens_t
-            indices_keep = torch.cat((global_index_t.long(), s_indices_keep), dim=1)
+            indices_keep = torch.cat((global_index_template.long(), s_indices_keep), dim=1)
             x = torch.gather(x, index=indices_keep.unsqueeze(-1).expand(B, -1, C), dim=1)
 
-        return x, global_index_t, global_index_s, removed_index_s, attn
+        return x, global_index_template, global_index_search, removed_index_search, attn
 class Block(nn.Module):
 
     def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=False, drop=0., attn_drop=0.,
@@ -164,7 +167,7 @@ class Block(nn.Module):
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
         self.norm2 = norm_layer(dim)
         mlp_hidden_dim = int(dim * mlp_ratio)
-        self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
+        self.mlp = MLP(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
 
     def forward(self, x, mask=None):
         x = x + self.drop_path(self.attn(self.norm1(x), mask))

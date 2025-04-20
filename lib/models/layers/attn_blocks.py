@@ -117,7 +117,7 @@ class CEBlock(nn.Module):
                         in_channels=dim,
                         out_channels=head_dim,
                         heads=num_heads,
-                        concat=True,
+                        concat=True if self.pooling_method == "concat" else False,
                         # dropout=attn_drop,
                         residual=True       # to add a learnable skip connection, allowing it to learn the identity if needed
                     )
